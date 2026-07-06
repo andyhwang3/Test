@@ -11,6 +11,10 @@ Windows 참고: `pip install nvidia-cublas-cu12` 등으로 설치되는 DLL은 s
 (nvidia\\cublas\\bin, nvidia\\cudnn\\bin)에 위치하는데, Windows는 이 경로를 자동으로
 PATH/DLL 검색 경로에 넣어주지 않는다. 그래서 import 시점에 os.add_dll_directory로
 직접 등록해준다 (Linux/macOS는 필요 없음).
+
+주의: nvidia.cublas / nvidia.cudnn 은 __init__.py가 없는 PEP 420 네임스페이스 패키지라
+__file__ 속성이 없다 (None). 따라서 실제 설치 경로를 얻으려면 __file__이 아니라
+__path__ (네임스페이스가 걸쳐 있는 모든 디렉터리 목록)를 사용해야 한다.
 """
 
 import subprocess
@@ -36,12 +40,16 @@ def _register_windows_cuda_dll_dirs() -> None:
         return
 
     for pkg in (_cublas, _cudnn):
-        bin_dir = Path(pkg.__file__).parent / "bin"
-        if bin_dir.is_dir():
-            try:
-                os.add_dll_directory(str(bin_dir))
-            except (OSError, AttributeError):
-                pass
+        # nvidia.cublas / nvidia.cudnn 은 __init__.py가 없는 namespace package라
+        # __file__ 속성이 없다(None). 대신 __path__ (경로 목록)를 사용해야 한다.
+        pkg_paths = list(getattr(pkg, "__path__", []) or [])
+        for pkg_path in pkg_paths:
+            bin_dir = Path(pkg_path) / "bin"
+            if bin_dir.is_dir():
+                try:
+                    os.add_dll_directory(str(bin_dir))
+                except (OSError, AttributeError):
+                    pass
 
 
 _register_windows_cuda_dll_dirs()
