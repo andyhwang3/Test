@@ -1,0 +1,16 @@
+# 필수 (Meta 추출)
+# ffmpeg / ffprobe 는 시스템에 별도 설치 필요 (pip 패키지 아님)
+
+# 영상 분석 (Scene Detection)
+scenedetect[opencv]>=0.6.4
+
+# Audio STT
+faster-whisper>=1.0.0
+
+# Audio QC (클릭/팝 탐지, 선택적)
+librosa>=0.10.0
+numpy>=1.24.0
+
+# --- 선택적 강화 ---
+# MXF 고유 필드(OP 패턴 등) 보강을 위해 bmxlib(mxf2raw CLI)를 별도 빌드/설치 권장
+#   https://github.com/bbc/bmx
