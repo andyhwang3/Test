@@ -2,10 +2,11 @@
 agents/speaker_diarization_agent.py
 
 4단계 Agent: 사람의 목소리만 정제된 음원(_vocals.wav)을 바탕으로 화자 분리(Diarization)를 수행한다.
-[3중 호환성 패치 마스터 버전]
+[3중 호환성 패치 + GPU ID 매핑 마스터 버전]
   1. PyTorch 2.6+의 weights_only=True 강제 잠금으로 인한 픽클 에러 우회 후크 주입
   2. Torchaudio 최신 버전에서 삭제된 set_audio_backend 어트리뷰트 에러(AttributeError) 실시간 더미 후크 주입
   3. NumPy 2.0+에서 삭제된 np.NaN 어트리뷰트 에러(AttributeError) 실시간 복구 후크 주입
+  4. main.py 할당 gpu_id 멀티 GPU 타겟팅 연동 패치
 """
 
 import os
@@ -26,14 +27,12 @@ logger = logging.getLogger("mxf_pipeline.speaker_agent")
 # =========================================================================
 import torchaudio
 if not hasattr(torchaudio, "set_audio_backend"):
-    # pyannote 내부에서 백엔드를 강제 지정할 때 크래시가 나지 않도록 빈 함수(Dummy)를 주입합니다.
     torchaudio.set_audio_backend = lambda backend: None
 
 # =========================================================================
 # 🛡️ [마스터 가드 3] NumPy 2.0+ 버전 하위 호환성 복구 (np.NaN AttributeError 방어)
 # =========================================================================
 if not hasattr(np, "NaN"):
-    # NumPy 2.0에서 삭제된 대문자 NaN을 표준 소문자 nan으로 링크하여 구버전 패키지 크래시를 방어합니다.
     np.NaN = np.nan
 # =========================================================================
 
@@ -58,8 +57,10 @@ torch.load = pytorch_compatibility_load
 class SpeakerDiarizationAgent(BaseAgent):
     name = "speaker_diarization_agent"
 
-    def __init__(self, hf_token: Optional[str] = None):
+    # 💡 main.py에서 넘겨주는 gpu_id 인자를 받아들이도록 수정
+    def __init__(self, hf_token: Optional[str] = None, gpu_id: Optional[Any] = None, **kwargs):
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
+        self.gpu_id = gpu_id
         self._pipeline = None
 
     def run(self, context: Dict[str, Any]) -> AudioSTTResult:
@@ -91,8 +92,12 @@ class SpeakerDiarizationAgent(BaseAgent):
                         "pyannote/speaker-diarization-3.1", 
                         use_auth_token=self.hf_token
                     )
+                    
+                    # 💡 지정된 특정 GPU 디바이스 번호(예: cuda:0)로 정밀 할당합니다.
                     if torch.cuda.is_available():
-                        self._pipeline.to(torch.device("cuda"))
+                        device_str = f"cuda:{self.gpu_id}" if self.gpu_id is not None else "cuda"
+                        print(f"🚀 [화자 분리] Pyannote 가속 디바이스 지정: {device_str}")
+                        self._pipeline.to(torch.device(device_str))
                 
                 diarization = self._pipeline(target_wav)
                 
