@@ -7,7 +7,7 @@ orchestrator.py
   3) SpeakerDiarizationAgent를 가동하여 임시 SPEAKER_00을 진짜 화자명으로 강제 치환
   4) scene_cuts(장면 전환점)들을 구간으로 역산한 후, 각 씬에 썸네일 경로 및 오브젝트 리스트 병합
   5) [싱크 업그레이드] 중앙값(Midpoint) 및 최대 교집합(Overlap) 연산으로 J-cut 대사 매핑 오류 원천 수정
-  6) 정제된 단일 계층 구조로 report.json 및 썸네일 융합 대시보드 report.html 파일 동시 작성
+  6) [미디어 플레이어 연동] 비디오 플레이어 화면 고정 및 씬/대사 클릭 시 타임라인 즉시 이동(Seek) 인터랙션 뷰어 구현
 """
 
 import os
@@ -159,7 +159,6 @@ class PipelineOrchestrator:
                     s_tc = getattr(seg, "start_timecode", "")
                     e_tc = getattr(seg, "end_timecode", "")
                     
-                    # 💡 [안전 패치 1] 만약 end_timecode 속성이 비어있다면 end_sec를 기반으로 자동 빌드
                     if not e_tc and hasattr(seg, 'end_sec') and seg.end_sec is not None:
                         tot_sec = int(seg.end_sec)
                         h = tot_sec // 3600
@@ -176,6 +175,7 @@ class PipelineOrchestrator:
                         "timecode": tc_display,
                         "start_timecode": s_tc,
                         "end_timecode": e_tc,
+                        "start_sec": seg_start,  # 💡 비디오 Seek를 위한 초 단위 데이터 바인딩
                         "speaker": getattr(seg, "speaker", "SPEAKER_00"),
                         "text": getattr(seg, "text", "").strip()
                     })
@@ -183,6 +183,7 @@ class PipelineOrchestrator:
             for start_sec, end_sec, cut, scene_num in scenes_windows:
                 scene_based_logs.append({
                     "scene_number": scene_num,
+                    "start_sec": start_sec,  # 💡 씬 박스 클릭 연동용 초 데이터 바인딩
                     "start_timecode": getattr(cut, "timecode", "00:00:00:00"),
                     "end_timecode": getattr(detected_cuts[scene_num], "timecode", "끝") if scene_num < total_cuts else "끝",
                     "thumbnail_path": getattr(cut, "image_path", ""),
@@ -194,8 +195,8 @@ class PipelineOrchestrator:
             for seg in stt_segments:
                 s_tc = getattr(seg, "start_timecode", "")
                 e_tc = getattr(seg, "end_timecode", "")
+                seg_start = getattr(seg, "start_sec", 0.0)
                 
-                # 💡 [안전 패치 2] 물리 씬 분할 점이 없는 단일 트랙 모드에서도 똑같이 종료 시간 빌드 보정
                 if not e_tc and hasattr(seg, 'end_sec') and seg.end_sec is not None:
                     tot_sec = int(seg.end_sec)
                     h = tot_sec // 3600
@@ -212,6 +213,7 @@ class PipelineOrchestrator:
                     "timecode": tc_display,
                     "start_timecode": s_tc,
                     "end_timecode": e_tc,
+                    "start_sec": seg_start,
                     "speaker": getattr(seg, "speaker", "SPEAKER_00"),
                     "text": getattr(seg, "text", "").strip()
                 })
@@ -219,6 +221,7 @@ class PipelineOrchestrator:
             start_tc = getattr(report.mxf_meta, "start_timecode", "00:00:00:00") if report.mxf_meta else "00:00:00:00"
             scene_based_logs.append({
                 "scene_number": 1,
+                "start_sec": 0.0,
                 "start_timecode": start_tc,
                 "end_timecode": "끝",
                 "thumbnail_path": "",
@@ -302,10 +305,10 @@ class PipelineOrchestrator:
                 spk_color_idx = int(speaker.split("_")[-1]) % 4 if "_" in speaker else 0
                 spk_class = f"spk-clr-{spk_color_idx}"
 
-                # 💡 {dlg.get('timecode')} 내부에 생성된 [시작 ~ 종료] 타임코드가 그대로 주입됩니다.
+                # 💡 대사 라인 클릭 시 자바스크립트 seekTo() 함수 연동 (상위 씬박스 클릭 이벤트 버블링 방지 포함)
                 dialogues_html += f"""
-                <div class="dlg-row">
-                    <span class="dlg-tc">{dlg.get('timecode')}</span>
+                <div class="dlg-row" onclick="event.stopPropagation(); seekTo({dlg.get('start_sec', 0.0)})">
+                    <span class="dlg-tc">▶ {dlg.get('timecode')}</span>
                     <span class="dlg-spk {spk_class}">{speaker}</span>
                     <span class="dlg-text">{dlg.get('text')}</span>
                 </div>
@@ -313,10 +316,11 @@ class PipelineOrchestrator:
             if not dialogues_html:
                 dialogues_html = '<div class="dlg-row-none">이 구간에는 대사가 존재하지 않습니다.</div>'
 
+            # 💡 씬 박스 자체를 클릭 가능한 영역으로 지정하고 마우스 포인터 활성화 스타일 부여
             scenes_section_html += f"""
-            <div class="scene-box">
+            <div class="scene-box" onclick="seekTo({sc.get('start_sec', 0.0)})">
                 <div class="scene-header">
-                    <div class="scene-title">🎬 SCENE #{sc.get('scene_number')}</div>
+                    <div class="scene-title">🎬 SCENE #{sc.get('scene_number')} <span style="font-size:12px; color:#93c5fd; font-weight:normal; margin-left:8px;">(클릭 시 이동)</span></div>
                     <div class="scene-duration">⏳ {sc.get('start_timecode')} ~ {sc.get('end_timecode')}</div>
                 </div>
                 
@@ -330,7 +334,7 @@ class PipelineOrchestrator:
                         <div class="meta-label">👁️ 화면 식별 오브젝트:</div>
                         <div class="badge-container">{obj_badges}</div>
                         
-                        <div class="meta-label" style="margin-top: 14px;">💬 타임라인 대사 스포팅:</div>
+                        <div class="meta-label" style="margin-top: 14px;">💬 타임라인 대사 스포팅 (클릭 이동):</div>
                         <div class="dlg-container">
                             {dialogues_html}
                         </div>
@@ -364,7 +368,7 @@ class PipelineOrchestrator:
             line-height: 1.5;
         }}
         .container {{
-            max-width: 1500px;
+            max-width: 1650px;
             margin: 0 auto;
         }}
         header {{
@@ -386,121 +390,168 @@ class PipelineOrchestrator:
         .meta-grid div {{ font-size: 14px; }}
         .meta-grid div strong {{ color: #a5f3fc; display: block; margin-bottom: 2px; }}
         
-        h2 {{ font-size: 20px; border-left: 5px solid var(--primary); padding-left: 10px; margin: 40px 0 20px 0; color: #cbd5e1; }}
+        h2 {{ font-size: 20px; border-left: 5px solid var(--primary); padding-left: 10px; margin: 30px 0 20px 0; color: #cbd5e1; }}
+        
+        /* 💡 플레이어와 타임라인 배치를 위한 2단 스플릿 레이아웃 */
+        .workspace {{
+            display: flex;
+            gap: 32px;
+            align-items: flex-start;
+        }}
+        
+        /* 💡 좌측 비디오 플레이어 사이드바 (스크롤 시 화면에 고정) */
+        .player-sidebar {{
+            position: sticky;
+            top: 24px;
+            width: 480px;
+            flex-shrink: 0;
+            background-color: var(--bg-card);
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+        }}
+        
+        .video-box {{
+            width: 100%;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            aspect-ratio: 16/9;
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.8);
+            margin-bottom: 16px;
+        }}
+        
+        .file-selector-btn {{
+            display: block;
+            width: 100%;
+            background-color: #312e81;
+            border: 1px dashed #6366f1;
+            color: #c7d2fe;
+            padding: 12px;
+            border-radius: 6px;
+            text-align: center;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.2s;
+        }}
+        .file-selector-btn:hover {{ background-color: #3730a3; border-color: #818cf8; }}
+        #video-uploader {{ display: none; }}
+
+        /* 💡 우측 타임라인 콘텐츠 영역 */
+        .content-area {{
+            flex-grow: 1;
+            min-width: 0;
+        }}
         
         .story-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-            gap: 20px;
-            margin-bottom: 40px;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+            margin-bottom: 30px;
         }}
         .story-card {{
             background-color: var(--bg-card);
             border-radius: 8px;
             overflow: hidden;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
             border: 1px solid #334155;
-            transition: transform 0.2s;
         }}
-        .story-card:hover {{ transform: translateY(-4px); }}
-        .story-card img {{ width: 100%; height: 180px; object-fit: cover; background: #0f172a; }}
-        .story-card-body {{ padding: 16px; }}
+        .story-card img {{ width: 100%; height: 150px; object-fit: cover; background: #0f172a; }}
+        .story-card-body {{ padding: 12px; }}
         .tc-badge {{
             display: inline-block;
             background-color: var(--primary);
             color: white;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: bold;
-            padding: 2px 8px;
+            padding: 1px 6px;
             border-radius: 4px;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
             font-family: monospace;
         }}
-        .story-text {{ margin: 0; font-size: 14.5px; color: #e2e8f0; word-break: keep-all; }}
+        .story-text {{ margin: 0; font-size: 13.5px; color: #e2e8f0; word-break: keep-all; }}
 
-        .timeline-container {{ display: flex; flex-direction: column; gap: 28px; }}
+        .timeline-container {{ display: flex; flex-direction: column; gap: 24px; }}
+        
+        /* 💡 클릭 가능한 씬 박스 스타일 조정 */
         .scene-box {{
             background-color: var(--bg-card);
             border-radius: 12px;
-            padding: 22px;
+            padding: 20px;
             border: 1px solid #334155;
             box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            cursor: pointer;
+            transition: all 0.2s;
         }}
+        .scene-box:hover {{ border-color: var(--primary); transform: translateY(-2px); background-color: #24324d; }}
+        
         .scene-header {{
             display: flex;
             justify-content: space-between;
             align-items: center;
             border-bottom: 1px solid #334155;
             padding-bottom: 12px;
-            margin-bottom: 18px;
+            margin-bottom: 16px;
         }}
-        .scene-title {{ font-size: 19px; font-weight: bold; color: #60a5fa; }}
-        .scene-duration {{ font-family: monospace; font-size: 16px; color: var(--text-muted); font-weight: bold; }}
+        .scene-title {{ font-size: 18px; font-weight: bold; color: #60a5fa; }}
+        .scene-duration {{ font-family: monospace; font-size: 15px; color: var(--text-muted); font-weight: bold; }}
         
-        .scene-split-layout {{
-            display: flex;
-            gap: 24px;
-            align-items: flex-start;
-        }}
-        .scene-visual-block {{
-            width: 320px;
-            flex-shrink: 0;
-        }}
+        .scene-split-layout {{ display: flex; gap: 20px; align-items: flex-start; }}
+        .scene-visual-block {{ width: 280px; flex-shrink: 0; }}
         .scene-img-frame {{
             width: 100%;
-            height: 180px;
+            height: 157px;
             object-fit: cover;
             border-radius: 8px;
             border: 1px solid #475569;
             background-color: #0f172a;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
         }}
-        .scene-data-block {{
-            flex-grow: 1;
-            min-width: 0;
-        }}
+        .scene-data-block {{ flex-grow: 1; min-width: 0; }}
 
-        .meta-label {{ font-size: 13px; font-weight: bold; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }}
-        .badge-container {{ background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; border: 1px solid #1e293b; }}
+        .meta-label {{ font-size: 12px; font-weight: bold; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }}
+        .badge-container {{ background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; border: 1px solid #1e293b; }}
         .obj-badge {{
             display: inline-block;
             background: #1e3a8a;
             color: #93c5fd;
             border: 1px solid #2563eb;
-            padding: 3px 12px;
+            padding: 2px 10px;
             border-radius: 20px;
-            font-size: 12.5px;
-            margin-right: 6px;
+            font-size: 12px;
+            margin-right: 4px;
             margin-bottom: 2px;
         }}
-        .obj-badge:last-child {{ margin-right: 0; }}
-        .obj-badge-none {{ font-size: 13px; color: var(--text-muted); font-style: italic; }}
+        .obj-badge-none {{ font-size: 12px; color: var(--text-muted); font-style: italic; }}
         
         .dlg-container {{
             background-color: #0f172a;
             border-radius: 8px;
-            padding: 6px;
+            padding: 4px;
             border: 1px solid #1e293b;
-            max-height: 250px;
+            max-height: 200px;
             overflow-y: auto;
         }}
         .dlg-container::-webkit-scrollbar {{ width: 6px; }}
         .dlg-container::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 4px; }}
+        
+        /* 💡 대사 행 클릭 포인터 디자인 */
         .dlg-row {{
             display: flex;
-            padding: 8px 12px;
+            padding: 6px 10px;
             border-bottom: 1px solid #1e293b;
-            font-size: 14px;
+            font-size: 13.5px;
             align-items: flex-start;
+            cursor: pointer;
+            transition: background 0.1s;
         }}
         .dlg-row:last-child {{ border-bottom: none; }}
-        .dlg-row:hover {{ background-color: rgba(255,255,255,0.02); }}
+        .dlg-row:hover {{ background-color: #1e293b; color: #fff; }}
         
-        /* 💡 듀얼 타임코드가 한 줄에 정렬되도록 충분한 너비(220px)를 확보합니다. */
-        .dlg-tc {{ font-family: monospace; color: var(--accent); min-width: 220px; flex-shrink: 0; font-weight: bold; margin-right: 12px; }}
-        .dlg-spk {{ width: 120px; flex-shrink: 0; font-weight: bold; font-size: 13px; font-family: monospace; }}
+        .dlg-tc {{ font-family: monospace; color: var(--accent); min-width: 210px; flex-shrink: 0; font-weight: bold; margin-right: 12px; }}
+        .dlg-spk {{ width: 110px; flex-shrink: 0; font-weight: bold; font-size: 12.5px; font-family: monospace; }}
         .dlg-text {{ color: #e2e8f0; word-break: break-all; }}
-        .dlg-row-none {{ padding: 20px; font-size: 13px; color: var(--text-muted); text-align: center; font-style: italic; }}
+        .dlg-row-none {{ padding: 15px; font-size: 12px; color: var(--text-muted); text-align: center; font-style: italic; }}
 
         .spk-clr-0 {{ color: #f43f5e; }}
         .spk-clr-1 {{ color: #3b82f6; }}
@@ -521,16 +572,65 @@ class PipelineOrchestrator:
             </div>
         </header>
 
-        <h2>🧠 로컬 Qwen3.6 스토리라인 요약 및 대표 맥락 분기점</h2>
-        <div class="story-grid">
-            {story_cards_html}
-        </div>
+        <div class="workspace">
+            
+            <div class="player-sidebar">
+                <div class="meta-label" style="color: #61dafb; font-size: 13px; margin-bottom: 10px;">🎯 미디어 타임라인 플레이어</div>
+                <video id="video-player" class="video-box" controls></video>
+                
+                <label for="video-uploader" class="file-selector-btn">
+                    📂 분석 영상 파일 로드 (.mp4 권장)
+                </label>
+                <input type="file" id="video-uploader" accept="video/*">
+                
+                <div style="margin-top: 15px; font-size: 12px; color: var(--text-muted); line-height: 1.4; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px;">
+                    💡 <strong>사용 방법:</strong> 프로젝트 소스 영상(또는 MP4 프록시)을 로드한 뒤, 우측의 <strong>씬(SCENE) 박스</strong>나 <strong>대사 타임라인</strong>을 클릭하면 해당 시간으로 자동 점프합니다.
+                </div>
+            </div>
 
-        <h2>📊 씬 단위 계층 타임라인 (물리 썸네일 & 사물 인지 & 화자 대본 결합)</h2>
-        <div class="timeline-container">
-            {scenes_section_html}
+            <div class="content-area">
+                <h2>🧠 로컬 Qwen3.6 스토리라인 요약 및 대표 맥락 분기점</h2>
+                <div class="story-grid">
+                    {story_cards_html}
+                </div>
+
+                <h2>📊 씬 단위 계층 타임라인 (물리 썸네일 & 사물 인지 & 화자 대본 결합)</h2>
+                <div class="timeline-container">
+                    {scenes_section_html}
+                </div>
+            </div>
+            
         </div>
     </div>
+
+    <script>
+        const player = document.getElementById('video-player');
+        const uploader = document.getElementById('video-uploader');
+
+        // 로컬 비디오 파일 브라우저 보안 우회 로더 Hook
+        uploader.addEventListener('change', function(e) {{
+            const file = e.target.files[0];
+            if (file) {{
+                const fileURL = URL.createObjectURL(file);
+                player.src = fileURL;
+                player.play().catch(err => console.log("자동 재생 정책으로 일시 정지됨."));
+            }}
+        }});
+
+        // 클릭 시 지정된 시간 초(seconds)로 즉시 이동하는 제어 함수
+        function seekTo(seconds) {{
+            if (!player.src) {{
+                alert("⚠️ 비디오가 로드되지 않았습니다! 왼쪽 패널에서 영상 파일을 먼저 선택해 주세요.");
+                return;
+            }}
+            player.currentTime = parseFloat(seconds);
+            player.play().catch(() => {{}});
+            
+            // 시각적 피드백 효과: 플레이어 일시 반짝임
+            player.style.outline = "3px solid #10b981";
+            setTimeout(() => player.style.outline = "none", 400);
+        }}
+    </script>
 </body>
 </html>
 """

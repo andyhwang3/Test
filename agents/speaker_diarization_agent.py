@@ -2,9 +2,9 @@
 agents/speaker_diarization_agent.py
 
 4단계 Agent: 사람의 목소리만 정제된 음원(_vocals.wav)을 바탕으로 화자 분리(Diarization)를 수행한다.
-[3중 호환성 패치 + GPU ID 매핑 + 타임코드 확장 마스터 버전]
+[3중 호환성 패치 + GPU ID 매핑 + 타임코드 확장 마스터 버전 (Torchaudio 완전 방어)]
   1. PyTorch 2.6+의 weights_only=True 강제 잠금으로 인한 픽클 에러 우회 후크 주입
-  2. Torchaudio 최신 버전에서 삭제된 set_audio_backend 어트리뷰트 에러(AttributeError) 실시간 더미 후크 주입
+  2. Torchaudio 최신 버전에서 삭제된 set_audio_backend / get_audio_backend 실시간 복구 후크 주입
   3. NumPy 2.0+에서 삭제된 np.NaN 어트리뷰트 에러(AttributeError) 실시간 복구 후크 주입
   4. main.py 할당 gpu_id 멀티 GPU 타겟팅 연동 패치
   5. 텍스트 출력 시 [시작시간 ~ 종료시간] 듀얼 타임코드 확장 반영
@@ -28,7 +28,13 @@ logger = logging.getLogger("mxf_pipeline.speaker_agent")
 # =========================================================================
 import torchaudio
 if not hasattr(torchaudio, "set_audio_backend"):
+    # pyannote 내부에서 백엔드를 강제 지정할 때 크래시가 나지 않도록 빈 함수(Dummy)를 주입합니다.
     torchaudio.set_audio_backend = lambda backend: None
+
+if not hasattr(torchaudio, "get_audio_backend"):
+    # 💡 [긴급 추가] 최신 torchaudio에서 삭제된 get_audio_backend를 복구하여 pyannote의 크래시를 방어합니다.
+    torchaudio.get_audio_backend = lambda: "soundfile"
+# =========================================================================
 
 # =========================================================================
 # 🛡️ [마스터 가드 3] NumPy 2.0+ 버전 하위 호환성 복구 (np.NaN AttributeError 방어)
@@ -188,7 +194,6 @@ class SpeakerDiarizationAgent(BaseAgent):
         for seg in audio_stt.segments:
             start_time = seg.start_timecode
             
-            # 💡 속성 검사 가드: 만약 end_timecode가 스키마에 정의되어 있으면 쓰고, 없으면 직접 계산
             end_time = getattr(seg, 'end_timecode', None)
             if not end_time and hasattr(seg, 'end_sec'):
                 tot_sec = int(seg.end_sec)
@@ -200,7 +205,6 @@ class SpeakerDiarizationAgent(BaseAgent):
             elif not end_time:
                 end_time = "??:??:??"
 
-            # 💡 [시작시간 ~ 종료시간] 형태로 파일에 저장되도록 포맷 변경
             txt_lines.append(f"[{start_time} ~ {end_time}] {seg.speaker}: {seg.text.strip()}\n")
             
         if txt_lines:
