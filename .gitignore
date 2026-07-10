@@ -1,0 +1,10 @@
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.log
+*.tmp
+*.pt
+__pycache__/
+venv/
