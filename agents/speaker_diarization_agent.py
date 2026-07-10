@@ -9,6 +9,10 @@ Pyannote AI 엔진을 가동하여 화자 분리(Diarization)를 수행하고 Wh
 import os
 import itertools
 import importlib
+import inspect
+import sys
+import types
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from agents.base import BaseAgent
@@ -91,10 +95,28 @@ class SpeakerDiarizationAgent(BaseAgent):
             if not hasattr(np, attr):
                 setattr(np, attr, np.nan)
 
-        # 🎯 2. [torchaudio 호환성 패치] set_audio_backend 제거 대응
+        # 🎯 2. [torchaudio 호환성 패치] audio backend API 제거 대응
         torchaudio = importlib.import_module("torchaudio")
+        if not hasattr(torchaudio, "get_audio_backend"):
+            torchaudio.get_audio_backend = lambda: "soundfile"
         if not hasattr(torchaudio, "set_audio_backend"):
             torchaudio.set_audio_backend = lambda x: None
+        if "torchaudio.backend.common" not in sys.modules:
+            @dataclass
+            class AudioMetaData:
+                sample_rate: int
+                num_frames: int
+                num_channels: int
+                bits_per_sample: int
+                encoding: str
+
+            backend_module = types.ModuleType("torchaudio.backend")
+            common_module = types.ModuleType("torchaudio.backend.common")
+            common_module.AudioMetaData = AudioMetaData
+            backend_module.common = common_module
+            torchaudio.backend = backend_module
+            sys.modules["torchaudio.backend"] = backend_module
+            sys.modules["torchaudio.backend.common"] = common_module
 
     def _load_pipeline(self):
         torch = importlib.import_module("torch")
@@ -103,16 +125,11 @@ class SpeakerDiarizationAgent(BaseAgent):
 
         if self._pipeline is None:
             # 🎯 3. [pyannote 버전 호환성 패치] token vs use_auth_token 동적 폴백
-            try:
-                self._pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    token=self.hf_token
-                )
-            except TypeError:
-                self._pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    use_auth_token=self.hf_token
-                )
+            auth_kwargs = self._auth_kwargs(Pipeline.from_pretrained)
+            self._pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                **auth_kwargs,
+            )
 
             if self._pipeline is None:
                 raise RuntimeError("Pyannote 파이프라인 로딩 실패: 모델 접근 권한 또는 HF_TOKEN을 확인하세요.")
@@ -121,6 +138,14 @@ class SpeakerDiarizationAgent(BaseAgent):
                 self._pipeline.to(torch.device(f"cuda:{self.gpu_id}"))
 
         return self._pipeline
+
+    def _auth_kwargs(self, from_pretrained) -> Dict[str, str]:
+        params = inspect.signature(from_pretrained).parameters
+        if "token" in params:
+            return {"token": self.hf_token}
+        if "use_auth_token" in params:
+            return {"use_auth_token": self.hf_token}
+        return {}
 
     def _run_diarization(self, pipeline, target_wav: str, num_speakers: Optional[int] = None):
         kwargs = {}
