@@ -2,9 +2,9 @@
 agents/speaker_diarization_agent.py
 
 4단계 Agent: 사람의 목소리만 정제된 음원(_vocals.wav)을 바탕으로 화자 분리(Diarization)를 수행한다.
-[3중 호환성 패치 + GPU ID 매핑 + 타임코드 확장 마스터 버전 (Torchaudio 완전 방어)]
+[3중 호환성 패치 + GPU ID 매핑 + 타임코드 확장 마스터 버전 (Torchaudio Backend 완전 방어)]
   1. PyTorch 2.6+의 weights_only=True 강제 잠금으로 인한 픽클 에러 우회 후크 주입
-  2. Torchaudio 최신 버전에서 삭제된 set_audio_backend / get_audio_backend 실시간 복구 후크 주입
+  2. Torchaudio 최신 버전에서 완전 삭제된 backend 모듈 및 서브모듈 실시간 가상 후크 주입 방어
   3. NumPy 2.0+에서 삭제된 np.NaN 어트리뷰트 에러(AttributeError) 실시간 복구 후크 주입
   4. main.py 할당 gpu_id 멀티 GPU 타겟팅 연동 패치
   5. 텍스트 출력 시 [시작시간 ~ 종료시간] 듀얼 타임코드 확장 반영
@@ -24,16 +24,36 @@ from schema import AudioSTTResult
 logger = logging.getLogger("mxf_pipeline.speaker_agent")
 
 # =========================================================================
-# 🛡️ [마스터 가드 1] Torchaudio 최신 버전 삭제 명령어 실시간 복구 (AttributeError 방어)
+# 🛡️ [마스터 가드 1] Torchaudio 최신 버전 삭제 명령어 및 모듈 실시간 가상화 (완전 방어)
 # =========================================================================
 import torchaudio
+from types import ModuleType
+
 if not hasattr(torchaudio, "set_audio_backend"):
-    # pyannote 내부에서 백엔드를 강제 지정할 때 크래시가 나지 않도록 빈 함수(Dummy)를 주입합니다.
     torchaudio.set_audio_backend = lambda backend: None
 
 if not hasattr(torchaudio, "get_audio_backend"):
-    # 💡 [긴급 추가] 최신 torchaudio에서 삭제된 get_audio_backend를 복구하여 pyannote의 크래시를 방어합니다.
     torchaudio.get_audio_backend = lambda: "soundfile"
+
+# 💡 [핵심 추가] 최신 torchaudio에서 통째로 날아간 torchaudio.backend 서브모듈 의존성 가상 주입
+class DynamicDummyModule(ModuleType):
+    def __getattr__(self, name):
+        class UniversalStub:
+            def __init__(self, *args, **kwargs): pass
+            def __call__(self, *args, **kwargs): return self
+            def __getattr__(self, _): return self
+        return UniversalStub()
+
+# 시스템 모듈 커널에 강제 후킹 등록
+if "torchaudio.backend" not in sys.modules:
+    backend_dummy = DynamicDummyModule("torchaudio.backend")
+    sys.modules["torchaudio.backend"] = backend_dummy
+    torchaudio.backend = backend_dummy
+
+if "torchaudio.backend.common" not in sys.modules:
+    common_dummy = DynamicDummyModule("torchaudio.backend.common")
+    sys.modules["torchaudio.backend.common"] = common_dummy
+    setattr(torchaudio.backend, "common", common_dummy)
 # =========================================================================
 
 # =========================================================================
@@ -130,7 +150,7 @@ class SpeakerDiarizationAgent(BaseAgent):
                 diarization_success = True
                 
             except Exception as e:
-                print(f"ℹ️ [화자 분리] Pyannote 구동 환경 우회 가드 발동 (권한 미승인 또는 토큰 오류): {e}")
+                print(f"❌ [화자 분리] Pyannote 최종 엔진 구동 실패: {e}")
 
         # -------------------------------------------------------------
         # 🛠️ [Mode 2] 100% 로컬 오프라인 목소리 주파수 지문 클러스터링 엔진 (토치 프리/토큰 프리)
