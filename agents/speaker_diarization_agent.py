@@ -2,8 +2,9 @@
 agents/speaker_diarization_agent.py
 
 4단계 Agent: 사람의 목소리만 정제된 음원(_vocals.wav)을 바탕으로 화자 분리(Diarization)를 수행한다.
-[PyTorch 2.6+ 호환성 패치] 최신 토치 환경에서 weights_only=True 가 발동하여 
-pyannote 객체 로드가 차단되는 픽클 에러(UnpicklingError)를 우회하는 마스터 가드를 장착함.
+[2중 호환성 패치 마스터 버전]
+  1. PyTorch 2.6+의 weights_only=True 강제 잠금으로 인한 픽클 에러 우회 후크 주입
+  2. Torchaudio 최신 버전에서 삭제된 set_audio_backend 어트리뷰트 에러(AttributeError) 실시간 더미 후크 주입
 """
 
 import os
@@ -20,20 +21,25 @@ from schema import AudioSTTResult
 logger = logging.getLogger("mxf_pipeline.speaker_agent")
 
 # =========================================================================
-# 🛡️ [PyTorch 2.6+ 마스터 가드] Pyannote 가중치 파일 언픽클 크래시 방어 몽키 패치
+# 🛡️ [마스터 가드 1] Torchaudio 최신 버전 삭제 명령어 실시간 복구 (AttributeError 방어)
+# =========================================================================
+import torchaudio
+if not hasattr(torchaudio, "set_audio_backend"):
+    # pyannote 내부에서 백엔드를 강제 지정할 때 크래시가 나지 않도록 빈 함수(Dummy)를 주입합니다.
+    torchaudio.set_audio_backend = lambda backend: None
+
+# =========================================================================
+# 🛡️ [마스터 가드 2] PyTorch 2.6+ 가중치 파일 언픽클 크래시 방어 (UnpicklingError 방어)
 # =========================================================================
 try:
-    # 1. PyTorch 자체의 안전 글로벌 목록에 Pyannote 핵심 사양 객체를 직접 등록합니다.
     from pyannote.audio.core.task import Specifications
     if hasattr(torch.serialization, 'add_safe_globals'):
         torch.serialization.add_safe_globals([Specifications])
 except ImportError:
     pass
 
-# 2. 확실한 예방을 위해 torch.load 호출 시 weights_only 장벽을 강제로 해제하는 백엔드 후크를 주입합니다.
 original_torch_load = torch.load
 def pytorch_compatibility_load(*args, **kwargs):
-    # 내부 서드파티 라이브러리(Lightning)가 weights_only 옵션을 누락했거나 True로 준 경우 무조건 False 우회
     kwargs["weights_only"] = False
     return original_torch_load(*args, **kwargs)
 torch.load = pytorch_compatibility_load
