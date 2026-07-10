@@ -158,7 +158,19 @@ class PipelineOrchestrator:
                 if best_scene_num is not None:
                     s_tc = getattr(seg, "start_timecode", "")
                     e_tc = getattr(seg, "end_timecode", "")
-                    tc_display = f"{s_tc} ~ {e_tc}" if e_tc else s_tc
+                    
+                    # 💡 [안전 패치 1] 만약 end_timecode 속성이 비어있다면 end_sec를 기반으로 자동 빌드
+                    if not e_tc and hasattr(seg, 'end_sec') and seg.end_sec is not None:
+                        tot_sec = int(seg.end_sec)
+                        h = tot_sec // 3600
+                        m = (tot_sec % 3600) // 60
+                        s = tot_sec % 60
+                        ms = int((seg.end_sec - tot_sec) * 100)
+                        e_tc = f"{h:02d}:{m:02d}:{s:02d}.{ms:02d}"
+                    elif not e_tc:
+                        e_tc = "??:??:??"
+
+                    tc_display = f"{s_tc} ~ {e_tc}"
 
                     dialogues_per_scene[best_scene_num].append({
                         "timecode": tc_display,
@@ -182,7 +194,20 @@ class PipelineOrchestrator:
             for seg in stt_segments:
                 s_tc = getattr(seg, "start_timecode", "")
                 e_tc = getattr(seg, "end_timecode", "")
-                tc_display = f"{s_tc} ~ {e_tc}" if e_tc else s_tc
+                
+                # 💡 [안전 패치 2] 물리 씬 분할 점이 없는 단일 트랙 모드에서도 똑같이 종료 시간 빌드 보정
+                if not e_tc and hasattr(seg, 'end_sec') and seg.end_sec is not None:
+                    tot_sec = int(seg.end_sec)
+                    h = tot_sec // 3600
+                    m = (tot_sec % 3600) // 60
+                    s = tot_sec % 60
+                    ms = int((seg.end_sec - tot_sec) * 100)
+                    e_tc = f"{h:02d}:{m:02d}:{s:02d}.{ms:02d}"
+                elif not e_tc:
+                    e_tc = "??:??:??"
+
+                tc_display = f"{s_tc} ~ {e_tc}"
+                
                 all_dialogues.append({
                     "timecode": tc_display,
                     "start_timecode": s_tc,
@@ -277,6 +302,7 @@ class PipelineOrchestrator:
                 spk_color_idx = int(speaker.split("_")[-1]) % 4 if "_" in speaker else 0
                 spk_class = f"spk-clr-{spk_color_idx}"
 
+                # 💡 {dlg.get('timecode')} 내부에 생성된 [시작 ~ 종료] 타임코드가 그대로 주입됩니다.
                 dialogues_html += f"""
                 <div class="dlg-row">
                     <span class="dlg-tc">{dlg.get('timecode')}</span>
@@ -458,6 +484,8 @@ class PipelineOrchestrator:
             max-height: 250px;
             overflow-y: auto;
         }}
+        .dlg-container::-webkit-scrollbar {{ width: 6px; }}
+        .dlg-container::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 4px; }}
         .dlg-row {{
             display: flex;
             padding: 8px 12px;
@@ -467,7 +495,8 @@ class PipelineOrchestrator:
         }}
         .dlg-row:last-child {{ border-bottom: none; }}
         .dlg-row:hover {{ background-color: rgba(255,255,255,0.02); }}
-        /* 시작~종료 타임코드가 잘리지 않도록 너비 및 여백 수정 */
+        
+        /* 💡 듀얼 타임코드가 한 줄에 정렬되도록 충분한 너비(220px)를 확보합니다. */
         .dlg-tc {{ font-family: monospace; color: var(--accent); min-width: 220px; flex-shrink: 0; font-weight: bold; margin-right: 12px; }}
         .dlg-spk {{ width: 120px; flex-shrink: 0; font-weight: bold; font-size: 13px; font-family: monospace; }}
         .dlg-text {{ color: #e2e8f0; word-break: break-all; }}
