@@ -2,9 +2,9 @@
 agents/speaker_diarization_agent.py
 
 4단계 Agent: 사람의 목소리만 정제된 음원(_vocals.wav)을 바탕으로 화자 분리(Diarization)를 수행한다.
-[3중 호환성 패치 + GPU ID 매핑 + 타임코드 확장 마스터 버전 (시스템 내부 구조 커널 방어)]
+[3중 호환성 패치 + GPU ID 매핑 + 타임코드 확장 마스터 버전 (완전 문법 검증형)]
   1. PyTorch 2.6+의 weights_only=True 강제 잠금으로 인한 픽클 에러 우회 후크 주입
-  2. Torchaudio 최신 버전에서 완전 삭제된 backend 모듈 및 서브모듈 실시간 가상 후크 주입 방어 (inspect 교란 방어 추가)
+  2. Torchaudio 최신 버전에서 완전 삭제된 backend 모듈 및 서브모듈 실시간 가상 후크 주입 방어
   3. NumPy 2.0+에서 삭제된 np.NaN 어트리뷰트 에러(AttributeError) 실시간 복구 후크 주입
   4. main.py 할당 gpu_id 멀티 GPU 타겟팅 연동 패치
   5. 텍스트 출력 시 [시작시간 ~ 종료시간] 듀얼 타임코드 확장 반영
@@ -24,7 +24,7 @@ from schema import AudioSTTResult
 logger = logging.getLogger("mxf_pipeline.speaker_agent")
 
 # =========================================================================
-# 🛡️ [마스터 가드 1] Torchaudio 최신 버전 삭제 명령어 및 모듈 실시간 가상화 (시스템 내부 커널 교란 방어)
+# 🛡️ [마스터 가드 1] Torchaudio 최신 버전 삭제 명령어 및 모듈 실시간 가상화
 # =========================================================================
 import torchaudio
 from types import ModuleType
@@ -35,10 +35,8 @@ if not hasattr(torchaudio, "set_audio_backend"):
 if not hasattr(torchaudio, "get_audio_backend"):
     torchaudio.get_audio_backend = lambda: "soundfile"
 
-# 💡 [정밀 보완] 파이썬 inspect 기능이 내부 파일 경로(__file__) 등을 조회할 때의 오작동을 원천 차단합니다.
 class DynamicDummyModule(ModuleType):
     def __getattr__(self, name):
-        # 파이썬 특수 시스템 속성(__으로 시작하고 끝나는 속성) 요청 시 가짜 객체 대신 표준 디폴트 값 반환
         if name.startswith("__") and name.endswith("__"):
             if name in ("__file__", "__cached__"):
                 return ""
@@ -59,7 +57,6 @@ class DynamicDummyModule(ModuleType):
                 return self
         return UniversalStub()
 
-# 시스템 모듈 커널에 강제 후킹 등록
 if "torchaudio.backend" not in sys.modules:
     backend_dummy = DynamicDummyModule("torchaudio.backend")
     sys.modules["torchaudio.backend"] = backend_dummy
@@ -182,4 +179,67 @@ class SpeakerDiarizationAgent(BaseAgent):
                 for seg in audio_stt.segments:
                     start_idx = int(seg.start_sec * sr)
                     end_idx = int(seg.end_sec * sr)
-                    chunk = y
+                    chunk = y[start_idx:end_idx]
+                    
+                    if len(chunk) < 1600:
+                        continue
+                        
+                    mfcc = librosa.feature.mfcc(y=chunk, sr=sr, n_mfcc=13)
+                    mfcc_mean = np.mean(mfcc, axis=1)
+                    features.append(mfcc_mean)
+                    valid_segments.append(seg)
+                
+                if features:
+                    X = np.array(features)
+                    X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-6)
+                    
+                    n_clusters = min(4, len(X))
+                    np.random.seed(42)
+                    init_idx = np.random.choice(len(X), n_clusters, replace=False)
+                    centroids = X[init_idx]
+                    
+                    for _ in range(20):
+                        distances = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2)
+                        labels = np.argmin(distances, axis=1)
+                        new_centroids = np.array([
+                            X[labels == k].mean(axis=0) if len(X[labels == k]) > 0 else centroids[k] 
+                            for k in range(n_clusters)
+                        ])
+                        if np.allclose(centroids, new_centroids):
+                            break
+                        centroids = new_centroids
+                    
+                    for seg, lbl in zip(valid_segments, labels):
+                        seg.speaker = f"SPEAKER_{lbl+1:02d}"
+                        
+                    print(f"✨ [화자 분리] 로컬 주파수 분할 성공: 총 {n_clusters}명의 대화 인물 스캔 마감.")
+                    diarization_success = True
+            except Exception as e:
+                print(f"❌ [화자 분리] 로컬 클러스터링 예외 발생: {e}")
+
+        self._write_transcript_file(audio_stt, final_txt_path)
+        return audio_stt
+
+    @staticmethod
+    def _write_transcript_file(audio_stt: AudioSTTResult, output_path: Path):
+        txt_lines = []
+        for seg in audio_stt.segments:
+            start_time = seg.start_timecode
+            
+            end_time = getattr(seg, 'end_timecode', None)
+            if not end_time and hasattr(seg, 'end_sec'):
+                tot_sec = int(seg.end_sec)
+                h = tot_sec // 3600
+                m = (tot_sec % 3600) // 60
+                s = tot_sec % 60
+                ms = int((seg.end_sec - tot_sec) * 100)
+                end_time = f"{h:02d}:{m:02d}:{s:02d}.{ms:02d}"
+            elif not end_time:
+                end_time = "??:??:??"
+
+            txt_lines.append(f"[{start_time} ~ {end_time}] {seg.speaker}: {seg.text.strip()}\n")
+            
+        if txt_lines:
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.writelines(txt_lines)
+        print(f"📝 [화자 분리] 대사 파일 내보내기 마감 -> '{output_path.name}'")
