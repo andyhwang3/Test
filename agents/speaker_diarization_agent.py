@@ -2,9 +2,9 @@
 agents/speaker_diarization_agent.py
 
 4단계 Agent: 사람의 목소리만 정제된 음원(_vocals.wav)을 바탕으로 화자 분리(Diarization)를 수행한다.
-[3중 호환성 패치 + GPU ID 매핑 + 타임코드 확장 마스터 버전 (인스펙션 빌트인 오인 방어)]
+[3중 호환성 패치 + GPU ID 매핑 + 타임코드 확장 마스터 버전 (TorchCodec 강제화 완벽 방어형)]
   1. PyTorch 2.6+의 weights_only=True 강제 잠금으로 인한 픽클 에러 우회 후크 주입
-  2. Torchaudio 최신 버전에서 완전 삭제된 backend 모듈 및 서브모듈 실시간 가상 후크 주입 방어 (inspect.getfile 빌트인 오인 방어 추가)
+  2. Torchaudio 최신 버전에서 완전 삭제된 backend 모듈 및 TorchCodec 강제 전환(load_with_torchcodec) 크래시 완전 방어
   3. NumPy 2.0+에서 삭제된 np.NaN 어트리뷰트 에러(AttributeError) 실시간 복구 후크 주입
   4. main.py 할당 gpu_id 멀티 GPU 타겟팅 연동 패치
   5. 텍스트 출력 시 [시작시간 ~ 종료시간] 듀얼 타임코드 확장 반영
@@ -24,7 +24,7 @@ from schema import AudioSTTResult
 logger = logging.getLogger("mxf_pipeline.speaker_agent")
 
 # =========================================================================
-# 🛡️ [마스터 가드 1] Torchaudio 최신 버전 삭제 명령어 및 모듈 실시간 가상화 (빌트인 오인 완천 방어)
+# 🛡️ [마스터 가드 1] Torchaudio 최신 버전 삭제 명령어, 모듈, 최신 코덱 의존성 완전 방어 Hook
 # =========================================================================
 import torchaudio
 from types import ModuleType
@@ -35,6 +35,31 @@ if not hasattr(torchaudio, "set_audio_backend"):
 if not hasattr(torchaudio, "get_audio_backend"):
     torchaudio.get_audio_backend = lambda: "soundfile"
 
+# 💡 [2026 긴급 커스텀 패치] TorchAudio 2.9+ 환경의 torchcodec 미설치로 인한 강제 크래시 우회 처리
+try:
+    import torchcodec
+except ImportError:
+    try:
+        import soundfile as sf
+        def safe_torchcodec_fallback(uri, frame_offset=0, num_frames=-1, *args, **kwargs):
+            channels_first = kwargs.get("channels_first", True)
+            start = frame_offset if frame_offset > 0 else 0
+            stop = (start + num_frames) if num_frames > 0 else None
+            
+            # 사운드파일 엔진을 이용해 오디오 바이너리를 강제로 안전하게 디코딩
+            data, sample_rate = sf.read(str(uri), start=start, stop=stop, dtype="float32", always_2d=True)
+            tensor = torch.from_numpy(data)
+            if channels_first:
+                tensor = tensor.t()  # [시간, 채널] 구조를 오디오 표준인 [채널, 시간] 구조로 차원 전치
+            return tensor, sample_rate
+
+        # 대행 로더 함수를 커널에 동적 바인딩
+        torchaudio.load_with_torchcodec = safe_torchcodec_fallback
+        torchaudio.load = safe_torchcodec_fallback
+    except ImportError:
+        pass
+
+# inspect 우회용 가상 모듈 빌드 트리
 class DynamicDummyModule(ModuleType):
     def __getattr__(self, name):
         if name.startswith("__") and name.endswith("__"):
@@ -57,7 +82,6 @@ class DynamicDummyModule(ModuleType):
                 return self
         return UniversalStub()
 
-# 💡 [핵심 보완] 가상 모듈 인스턴스에 명시적으로 가짜 파일명 문자열을 바인딩하여 inspect.getfile의 TypeError를 원천 방어합니다.
 if "torchaudio.backend" not in sys.modules:
     backend_dummy = DynamicDummyModule("torchaudio.backend")
     backend_dummy.__file__ = "fake_torchaudio_backend.py"
