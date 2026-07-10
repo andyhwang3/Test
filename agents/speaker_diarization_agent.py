@@ -118,6 +118,13 @@ class SpeakerDiarizationAgent(BaseAgent):
             sys.modules["torchaudio.backend"] = backend_module
             sys.modules["torchaudio.backend.common"] = common_module
 
+        # 🎯 3. [PyTorch 2.6+ 호환성 패치] pyannote 체크포인트의 TorchVersion allowlist 등록
+        torch = importlib.import_module("torch")
+        add_safe_globals = getattr(torch.serialization, "add_safe_globals", None)
+        torch_version_class = getattr(getattr(torch, "torch_version", None), "TorchVersion", None)
+        if add_safe_globals and torch_version_class:
+            add_safe_globals([torch_version_class])
+
     def _load_pipeline(self):
         torch = importlib.import_module("torch")
         pyannote_audio = importlib.import_module("pyannote.audio")
