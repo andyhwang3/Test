@@ -2,9 +2,10 @@
 agents/speaker_diarization_agent.py
 
 4단계 Agent: 사람의 목소리만 정제된 음원(_vocals.wav)을 바탕으로 화자 분리(Diarization)를 수행한다.
-[2중 호환성 패치 마스터 버전]
+[3중 호환성 패치 마스터 버전]
   1. PyTorch 2.6+의 weights_only=True 강제 잠금으로 인한 픽클 에러 우회 후크 주입
   2. Torchaudio 최신 버전에서 삭제된 set_audio_backend 어트리뷰트 에러(AttributeError) 실시간 더미 후크 주입
+  3. NumPy 2.0+에서 삭제된 np.NaN 어트리뷰트 에러(AttributeError) 실시간 복구 후크 주입
 """
 
 import os
@@ -27,6 +28,14 @@ import torchaudio
 if not hasattr(torchaudio, "set_audio_backend"):
     # pyannote 내부에서 백엔드를 강제 지정할 때 크래시가 나지 않도록 빈 함수(Dummy)를 주입합니다.
     torchaudio.set_audio_backend = lambda backend: None
+
+# =========================================================================
+# 🛡️ [마스터 가드 3] NumPy 2.0+ 버전 하위 호환성 복구 (np.NaN AttributeError 방어)
+# =========================================================================
+if not hasattr(np, "NaN"):
+    # NumPy 2.0에서 삭제된 대문자 NaN을 표준 소문자 nan으로 링크하여 구버전 패키지 크래시를 방어합니다.
+    np.NaN = np.nan
+# =========================================================================
 
 # =========================================================================
 # 🛡️ [마스터 가드 2] PyTorch 2.6+ 가중치 파일 언픽클 크래시 방어 (UnpicklingError 방어)
