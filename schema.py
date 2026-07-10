@@ -61,6 +61,9 @@ class TranscriptSegment:
     text: str
     track_index: int
     confidence: Optional[float] = None
+    start_timecode: str = ""  # ⭐ [추가] 시작 타임코드 (시:분:초:프레임)
+    end_timecode: str = ""    # ⭐ [추가] 종료 타임코드 (시:분:초:프레임)
+    speaker: str = "SPEAKER_00"  # ⭐ [추가] 화자 식별 정보 필드 주입
 
 
 @dataclass
@@ -84,6 +87,18 @@ class AudioQCResult:
     true_peak_dbtp: Optional[float] = None
     anomalies: List[AudioAnomaly] = field(default_factory=list)
 
+@dataclass
+class StorylineShift:
+    """스토리라인이 변하는 각 지점 정보"""
+    start_sec: float
+    start_timecode: str
+    summary: str
+    thumbnail_path: Optional[str] = None
+
+@dataclass
+class StorylineAnalysisResult:
+    """스토리라인 분석 최종 결과셋"""
+    shifts: List[StorylineShift] = field(default_factory=list)
 
 @dataclass
 class PipelineReport:
@@ -92,6 +107,8 @@ class PipelineReport:
     video_analysis: VideoAnalysisResult = field(default_factory=VideoAnalysisResult)
     audio_stt: AudioSTTResult = field(default_factory=AudioSTTResult)
     audio_qc: AudioQCResult = field(default_factory=AudioQCResult)
+    # ⭐ [추가] 스토리라인 분석 데이터 필드 연동
+    storyline_analysis: StorylineAnalysisResult = field(default_factory=StorylineAnalysisResult)
     errors: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
