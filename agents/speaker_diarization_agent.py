@@ -2,11 +2,12 @@
 agents/speaker_diarization_agent.py
 
 4단계 Agent: 사람의 목소리만 정제된 음원(_vocals.wav)을 바탕으로 화자 분리(Diarization)를 수행한다.
-[3중 호환성 패치 + GPU ID 매핑 마스터 버전]
+[3중 호환성 패치 + GPU ID 매핑 + 타임코드 확장 마스터 버전]
   1. PyTorch 2.6+의 weights_only=True 강제 잠금으로 인한 픽클 에러 우회 후크 주입
   2. Torchaudio 최신 버전에서 삭제된 set_audio_backend 어트리뷰트 에러(AttributeError) 실시간 더미 후크 주입
   3. NumPy 2.0+에서 삭제된 np.NaN 어트리뷰트 에러(AttributeError) 실시간 복구 후크 주입
   4. main.py 할당 gpu_id 멀티 GPU 타겟팅 연동 패치
+  5. 텍스트 출력 시 [시작시간 ~ 종료시간] 듀얼 타임코드 확장 반영
 """
 
 import os
@@ -57,7 +58,6 @@ torch.load = pytorch_compatibility_load
 class SpeakerDiarizationAgent(BaseAgent):
     name = "speaker_diarization_agent"
 
-    # 💡 main.py에서 넘겨주는 gpu_id 인자를 받아들이도록 수정
     def __init__(self, hf_token: Optional[str] = None, gpu_id: Optional[Any] = None, **kwargs):
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
         self.gpu_id = gpu_id
@@ -93,7 +93,6 @@ class SpeakerDiarizationAgent(BaseAgent):
                         use_auth_token=self.hf_token
                     )
                     
-                    # 💡 지정된 특정 GPU 디바이스 번호(예: cuda:0)로 정밀 할당합니다.
                     if torch.cuda.is_available():
                         device_str = f"cuda:{self.gpu_id}" if self.gpu_id is not None else "cuda"
                         print(f"🚀 [화자 분리] Pyannote 가속 디바이스 지정: {device_str}")
@@ -187,7 +186,22 @@ class SpeakerDiarizationAgent(BaseAgent):
     def _write_transcript_file(audio_stt: AudioSTTResult, output_path: Path):
         txt_lines = []
         for seg in audio_stt.segments:
-            txt_lines.append(f"[{seg.start_timecode}] {seg.speaker}: {seg.text.strip()}\n")
+            start_time = seg.start_timecode
+            
+            # 💡 속성 검사 가드: 만약 end_timecode가 스키마에 정의되어 있으면 쓰고, 없으면 직접 계산
+            end_time = getattr(seg, 'end_timecode', None)
+            if not end_time and hasattr(seg, 'end_sec'):
+                tot_sec = int(seg.end_sec)
+                h = tot_sec // 3600
+                m = (tot_sec % 3600) // 60
+                s = tot_sec % 60
+                ms = int((seg.end_sec - tot_sec) * 100)
+                end_time = f"{h:02d}:{m:02d}:{s:02d}.{ms:02d}"
+            elif not end_time:
+                end_time = "??:??:??"
+
+            # 💡 [시작시간 ~ 종료시간] 형태로 파일에 저장되도록 포맷 변경
+            txt_lines.append(f"[{start_time} ~ {end_time}] {seg.speaker}: {seg.text.strip()}\n")
             
         if txt_lines:
             with open(output_path, "w", encoding="utf-8") as f:
