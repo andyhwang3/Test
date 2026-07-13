@@ -4,6 +4,7 @@ agents/audio_stt_agent.py
 3단계 Agent: 오디오 스트림을 무손실 단일 채널로 추출한 뒤 고정밀 STT를 수행한다.
 Demucs AI의 분리 능력을 극대화하여 원본(_raw_dump), 목소리(_vocals), 배경음(_bgm) 
 총 3종의 독립된 wave 파일 패키지를 아웃풋 폴더에 완벽하게 분리 보존한다.
+(음원 경량화 패치: 16kHz Mono 16-bit Downsampling 적용으로 파일 용량 80% 감축)
 """
 
 import os
@@ -64,7 +65,7 @@ class AudioSTTAgent(BaseAgent):
         final_bgm_path = base_dir / f"{stem_name}_bgm.wav"        # 클린 BGM / MR
         final_txt_path = base_dir / f"{stem_name}_transcript.txt"
 
-        # 1. MXF 오리지널 오디오 무손실 추출
+        # 1. MXF 오리지널 오디오 무손실 추출 (16kHz Mono)
         print("🔊 [STT 엔진] MXF 오디오 스트림 추출 중...")
         cmd_extract = [
             self.ffmpeg_bin, "-y",
@@ -84,7 +85,7 @@ class AudioSTTAgent(BaseAgent):
         subprocess.run(cmd_extract, capture_output=True)
 
         # 2. Demucs AI 오디오 소스 정밀 분리 가동
-        print("🧠 [STT 엔진] Demucs AI 오디오 소스 정밀 분리 가동 (htdemucs_ft + Shifts 앙상블)...")
+        print("🧠 [STT 엔진] Demucs AI 오디오 소스 정밀 분리 가동 (htdemucs_ft)...")
         
         demucs_model_name = "htdemucs_ft"
         
@@ -121,7 +122,7 @@ class AudioSTTAgent(BaseAgent):
         except Exception as e:
             print(f"⚠️ [STT 엔진] Demucs 가동 중 내부 오류 발생: {e}")
 
-        # 🎯 [버그 수정] 사용 모델명(htdemucs_ft) 경로와 일치하도록 수정
+        # 🎯 [수정 포인트] Demucs 출력물 용량 경량화 (16kHz Mono 16-bit 변환)
         demucs_vocal_src = base_dir / demucs_model_name / f"{stem_name}_raw_dump" / "vocals.wav"
         demucs_bgm_src = base_dir / demucs_model_name / f"{stem_name}_raw_dump" / "no_vocals.wav"
 
@@ -129,26 +130,32 @@ class AudioSTTAgent(BaseAgent):
             if final_vocals_path.exists(): os.remove(final_vocals_path)
             if final_bgm_path.exists(): os.remove(final_bgm_path)
             
-            os.rename(str(demucs_vocal_src), str(final_vocals_path))
-            os.rename(str(demucs_bgm_src), str(final_bgm_path))
+            print("📦 [STT 엔진] 분리된 트랙 용량 다이어트 및 정제 진행 중 (16kHz Mono 변환)...")
             
-            # 🎯 [핵심 추가] 분리된 보컬의 작은 목소리를 정밀 증폭시키는 Normalization 처리
-            print("🔊 [STT 엔진] 정제된 보컬 트랙 음량 평준화 및 작은 목소리 복원 중...")
-            norm_vocal_tmp = base_dir / f"{stem_name}_vocals_norm.wav"
-            cmd_norm = [
+            # 💡 1) 보컬 트랙: 16kHz Mono + 음량 평준화(Loudnorm) 단일 패스 처리 (용량 80% 절감)
+            cmd_vocal_proc = [
                 self.ffmpeg_bin, "-y",
-                "-i", str(final_vocals_path),
-                "-filter:a", "loudnorm=I=-16:TP=-1.5:LRA=11",
+                "-i", str(demucs_vocal_src),
+                "-ac", "1",            # 2채널 -> 1채널(모노)
+                "-ar", "16000",        # 44.1/48kHz -> 16kHz
                 "-acodec", "pcm_s16le",
-                str(norm_vocal_tmp)
+                "-filter:a", "loudnorm=I=-16:TP=-1.5:LRA=11", # 작은 목소리 증폭
+                str(final_vocals_path)
             ]
-            subprocess.run(cmd_norm, capture_output=True)
-            
-            if norm_vocal_tmp.exists():
-                os.remove(final_vocals_path)
-                os.rename(str(norm_vocal_tmp), str(final_vocals_path))
+            subprocess.run(cmd_vocal_proc, capture_output=True)
 
-            print("✨ [STT 엔진] 오디오 트리플 분리 및 보컬 정제 성공!")
+            # 💡 2) 배경음 트랙: 16kHz Mono 다운샘플링
+            cmd_bgm_proc = [
+                self.ffmpeg_bin, "-y",
+                "-i", str(demucs_bgm_src),
+                "-ac", "1",
+                "-ar", "16000",
+                "-acodec", "pcm_s16le",
+                str(final_bgm_path)
+            ]
+            subprocess.run(cmd_bgm_proc, capture_output=True)
+
+            print("✨ [STT 엔진] 오디오 트리플 분리 및 경량화(16kHz) 완료!")
             print(f"       🎙️ 목소리 전용 소스 저장 완료 -> '{final_vocals_path.name}'")
             print(f"       🎵 배경음악 전용 소스 저장 완료 -> '{final_bgm_path.name}'")
         else:
