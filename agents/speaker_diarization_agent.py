@@ -106,8 +106,11 @@ class SpeakerDiarizationAgent(BaseAgent):
                         print(f"🚀 [화자 분리] Pyannote 가속 디바이스 지정: {device_str}")
                         self._pipeline.to(torch.device(device_str))
                 
+                min_spk = context.get("min_speakers", 8)   # 기본 최소 8명
+                max_spk = context.get("max_speakers", 15)  # 기본 최대 15명
+                
                 # 최신 버전에서는 내부적으로 torchcodec과 FFmpeg를 직접 사용하여 디코딩합니다.
-                diarization = self._pipeline(target_wav)
+                diarization = self._pipeline(target_wav, min_speakers=min_spk, max_speakers=max_spk)
                 
                 # pyannote 최신 버전(DiarizeOutput) 및 구버전(Annotation) 자동 호환 추출
                 annotation = getattr(diarization, "speaker_diarization", diarization)
