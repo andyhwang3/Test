@@ -88,10 +88,18 @@ class SpeakerDiarizationAgent(BaseAgent):
                 from pyannote.audio import Pipeline
                 if self._pipeline is None:
                     # 최신 API 권장사항에 맞춰 use_auth_token을 토큰 변수로 적용
-                    self._pipeline = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization-3.1", 
-                        use_auth_token=self.hf_token
-                    )
+                    try:
+                        # 최신 버전 파라미터 (token)
+                        self._pipeline = Pipeline.from_pretrained(
+                            "pyannote/speaker-diarization-3.1", 
+                            token=self.hf_token
+                        )
+                    except TypeError:
+                        # 구버전 파라미터 (use_auth_token) 백업
+                        self._pipeline = Pipeline.from_pretrained(
+                            "pyannote/speaker-diarization-3.1", 
+                            use_auth_token=self.hf_token
+                        )
                     
                     if torch.cuda.is_available():
                         device_str = f"cuda:{self.gpu_id}" if self.gpu_id is not None else "cuda"
