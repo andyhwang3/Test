@@ -109,13 +109,16 @@ class SpeakerDiarizationAgent(BaseAgent):
                 # 최신 버전에서는 내부적으로 torchcodec과 FFmpeg를 직접 사용하여 디코딩합니다.
                 diarization = self._pipeline(target_wav)
                 
+                # pyannote 최신 버전(DiarizeOutput) 및 구버전(Annotation) 자동 호환 추출
+                annotation = getattr(diarization, "speaker_diarization", diarization)
+                
                 for seg in audio_stt.segments:
                     seg_start = seg.start_sec
                     seg_end = seg.end_sec
                     best_speaker = "SPEAKER_00"
                     max_overlap = 0.0
                     
-                    for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    for turn, _, speaker in annotation.itertracks(yield_label=True):
                         overlap = min(seg_end, turn.end) - max(seg_start, turn.start)
                         if overlap > max_overlap:
                             max_overlap = overlap
@@ -125,7 +128,7 @@ class SpeakerDiarizationAgent(BaseAgent):
                         seg.speaker = best_speaker
                     else:
                         seg_mid = (seg_start + seg_end) / 2.0
-                        for turn, _, speaker in diarization.itertracks(yield_label=True):
+                        for turn, _, speaker in annotation.itertracks(yield_label=True):
                             if turn.start <= seg_mid <= turn.end:
                                 seg.speaker = speaker
                                 break
