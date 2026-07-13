@@ -21,13 +21,13 @@ class AudioSTTAgent(BaseAgent):
 
     def __init__(
         self,
-        model_size: str = "large-v3",  # 💡 [권장] 대사 누락 방지에는 'turbo'보다 'large-v3'가 정밀함
+        model_size: str = "large-v3",
         device: str = "cuda",
         gpu_id: int = 0,
         compute_type: str = "float16",
         ffmpeg_bin: str = "ffmpeg",
         dialogue_track_index: Optional[int] = None,
-        use_raw_audio_for_stt: bool = False  # 💡 Demucs 오버디노이징으로 대사 누락 시 True로 변경
+        use_raw_audio_for_stt: bool = False
     ):
         self.model_size = model_size
         self.device = device
@@ -83,8 +83,10 @@ class AudioSTTAgent(BaseAgent):
         ])
         subprocess.run(cmd_extract, capture_output=True)
 
-        # 2. Demucs 분리 가동
-        print("🧠 [STT 엔진] Demucs AI 오디오 소스 정밀 분리 가동 (Vocals & BGM 병렬 추출)...")
+        # 2. Demucs AI 오디오 소스 정밀 분리 가동
+        print("🧠 [STT 엔진] Demucs AI 오디오 소스 정밀 분리 가동 (htdemucs_ft + Shifts 앙상블)...")
+        
+        demucs_model_name = "htdemucs_ft"
         
         try:
             import torchaudio
@@ -102,7 +104,10 @@ class AudioSTTAgent(BaseAgent):
 
             sys.argv = [
                 "demucs",
+                "-n", demucs_model_name,
                 "--two-stems", "vocals",
+                "--shifts", "2",              # 음성 잘림 방지용 앙상블
+                "--overlap", "0.25",
                 "-d", self.device_str,
                 "-o", str(base_dir),
                 str(raw_wav_path)
@@ -116,8 +121,9 @@ class AudioSTTAgent(BaseAgent):
         except Exception as e:
             print(f"⚠️ [STT 엔진] Demucs 가동 중 내부 오류 발생: {e}")
 
-        demucs_vocal_src = base_dir / "htdemucs" / f"{stem_name}_raw_dump" / "vocals.wav"
-        demucs_bgm_src = base_dir / "htdemucs" / f"{stem_name}_raw_dump" / "no_vocals.wav"
+        # 🎯 [버그 수정] 사용 모델명(htdemucs_ft) 경로와 일치하도록 수정
+        demucs_vocal_src = base_dir / demucs_model_name / f"{stem_name}_raw_dump" / "vocals.wav"
+        demucs_bgm_src = base_dir / demucs_model_name / f"{stem_name}_raw_dump" / "no_vocals.wav"
 
         if demucs_vocal_src.exists() and demucs_bgm_src.exists():
             if final_vocals_path.exists(): os.remove(final_vocals_path)
@@ -125,7 +131,26 @@ class AudioSTTAgent(BaseAgent):
             
             os.rename(str(demucs_vocal_src), str(final_vocals_path))
             os.rename(str(demucs_bgm_src), str(final_bgm_path))
-            print("✨ [STT 엔진] 오디오 트리플 분리 대성공!")
+            
+            # 🎯 [핵심 추가] 분리된 보컬의 작은 목소리를 정밀 증폭시키는 Normalization 처리
+            print("🔊 [STT 엔진] 정제된 보컬 트랙 음량 평준화 및 작은 목소리 복원 중...")
+            norm_vocal_tmp = base_dir / f"{stem_name}_vocals_norm.wav"
+            cmd_norm = [
+                self.ffmpeg_bin, "-y",
+                "-i", str(final_vocals_path),
+                "-filter:a", "loudnorm=I=-16:TP=-1.5:LRA=11",
+                "-acodec", "pcm_s16le",
+                str(norm_vocal_tmp)
+            ]
+            subprocess.run(cmd_norm, capture_output=True)
+            
+            if norm_vocal_tmp.exists():
+                os.remove(final_vocals_path)
+                os.rename(str(norm_vocal_tmp), str(final_vocals_path))
+
+            print("✨ [STT 엔진] 오디오 트리플 분리 및 보컬 정제 성공!")
+            print(f"       🎙️ 목소리 전용 소스 저장 완료 -> '{final_vocals_path.name}'")
+            print(f"       🎵 배경음악 전용 소스 저장 완료 -> '{final_bgm_path.name}'")
         else:
             print("⚠️ [STT 엔진] AI 분리 트랙 배출 실패 -> 오리지널 덤프를 기반 파일로 우회 설정합니다.")
             if final_vocals_path.exists(): os.remove(final_vocals_path)
@@ -133,45 +158,37 @@ class AudioSTTAgent(BaseAgent):
 
         try:
             import shutil
-            if (base_dir / "htdemucs").exists():
-                shutil.rmtree(base_dir / "htdemucs")
+            if (base_dir / demucs_model_name).exists():
+                shutil.rmtree(base_dir / demucs_model_name)
         except Exception:
             pass
 
         # 3. Whisper 입력 타겟 음원 선택
         target_audio = str(raw_wav_path if self.use_raw_audio_for_stt and raw_wav_path.exists() else final_vocals_path)
 
-        # 4. Whisper 고정밀 추론 시작
+        # 4. Whisper 노스킵(No-Skip) 고정밀 추론 시작
         model = self._load_model()
-        print(f"🎙️ [STT ENGINE] '{Path(target_audio).name}' 소스 기반 고정밀 음성 인식 진행 중...")
+        print(f"🎙️ [STT ENGINE] '{Path(target_audio).name}' 정제 소스 기반 음성 인식 진행 중...")
 
         segments, info = model.transcribe(
             target_audio,
             language="ko",
             beam_size=5,
-            patience=1.0,                       # 빔 서치 탐색 유지력 강화
+            patience=1.0,
             
-            # 🔑 [핵심 1] Temperature Fallback 활성화 (추론 실패 시 온도를 올려가며 재시도)
-            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            # 🚨 [핵심 1] VAD 필터 완벽 Off (작은 목소리/속삭임 자르기 완전 방지)
+            vad_filter=False,
             
-            # 🔑 [핵심 2] 스킵 및 거름 현상 완화
-            no_speech_threshold=0.6,             # 무음 판정 임계값 완화
-            log_prob_threshold=-2.0,            # -1.0에서 -2.0으로 낮춰 작은/웅얼거리는 대사 살림
-            compression_ratio_threshold=2.4,
-            condition_on_previous_text=False,   # 앞 문장에 구속되어 통으로 스킵하는 현상 방지
-            suppress_blank=False,
+            # 🚨 [핵심 2] 무음/확신도 판정 필터 해제 (스킵 현상 0% 방지)
+            no_speech_threshold=None,
+            log_prob_threshold=None,
+            compression_ratio_threshold=None,
             
-            # 🔑 [핵심 3] 프롬프트 튜닝
+            # 🚨 [핵심 3] 문맥 구속 해제 및 안정화
+            condition_on_previous_text=False,
+            temperature=0.0,
             initial_prompt="정확한 한국어 방송 대사, 속삭임, 추임새, 작은 목소리까지 빠짐없이 자막 녹취.",
-            
-            # 🔑 [핵심 4] 소프트 VAD 적용 (무음 점프 현상 방지)
-            vad_filter=True,
-            vad_parameters=dict(
-                threshold=0.2,                  # 기본 0.5 -> 0.2로 낮춰 아주 작은 목소리도 VAD가 살려둠
-                min_speech_duration_ms=100,
-                max_speech_duration_s=30,
-                min_silence_duration_ms=500
-            )
+            suppress_blank=False
         )
 
         fps = mxf_meta.fps or 25.0
