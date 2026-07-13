@@ -21,12 +21,13 @@ class AudioSTTAgent(BaseAgent):
 
     def __init__(
         self,
-        model_size: str = "turbo",
+        model_size: str = "large-v3",  # 💡 [권장] 대사 누락 방지에는 'turbo'보다 'large-v3'가 정밀함
         device: str = "cuda",
         gpu_id: int = 0,
         compute_type: str = "float16",
         ffmpeg_bin: str = "ffmpeg",
-        dialogue_track_index: Optional[int] = None
+        dialogue_track_index: Optional[int] = None,
+        use_raw_audio_for_stt: bool = False  # 💡 Demucs 오버디노이징으로 대사 누락 시 True로 변경
     ):
         self.model_size = model_size
         self.device = device
@@ -35,6 +36,7 @@ class AudioSTTAgent(BaseAgent):
         self.compute_type = compute_type
         self.ffmpeg_bin = ffmpeg_bin
         self.dialogue_track_index = dialogue_track_index
+        self.use_raw_audio_for_stt = use_raw_audio_for_stt
         self._model = None
 
     def _load_model(self):
@@ -81,7 +83,7 @@ class AudioSTTAgent(BaseAgent):
         ])
         subprocess.run(cmd_extract, capture_output=True)
 
-        # 2. 내장형 토치오디오 몽키 패치 기반 Demucs 안전 분리 연산
+        # 2. Demucs 분리 가동
         print("🧠 [STT 엔진] Demucs AI 오디오 소스 정밀 분리 가동 (Vocals & BGM 병렬 추출)...")
         
         try:
@@ -124,8 +126,6 @@ class AudioSTTAgent(BaseAgent):
             os.rename(str(demucs_vocal_src), str(final_vocals_path))
             os.rename(str(demucs_bgm_src), str(final_bgm_path))
             print("✨ [STT 엔진] 오디오 트리플 분리 대성공!")
-            print(f"       🎙️ 목소리 전용 소스 저장 완료 -> '{final_vocals_path.name}'")
-            print(f"       🎵 배경음악 전용 소스 저장 완료 -> '{final_bgm_path.name}'")
         else:
             print("⚠️ [STT 엔진] AI 분리 트랙 배출 실패 -> 오리지널 덤프를 기반 파일로 우회 설정합니다.")
             if final_vocals_path.exists(): os.remove(final_vocals_path)
@@ -138,22 +138,40 @@ class AudioSTTAgent(BaseAgent):
         except Exception:
             pass
 
-        # 3. Whisper 추론 시작
+        # 3. Whisper 입력 타겟 음원 선택
+        target_audio = str(raw_wav_path if self.use_raw_audio_for_stt and raw_wav_path.exists() else final_vocals_path)
+
+        # 4. Whisper 고정밀 추론 시작
         model = self._load_model()
-        print(f"🎙️ [STT ENGINE] '{final_vocals_path.name}' 소스 기반 고정밀 음성 인식 진행 중...")
+        print(f"🎙️ [STT ENGINE] '{Path(target_audio).name}' 소스 기반 고정밀 음성 인식 진행 중...")
 
         segments, info = model.transcribe(
-            str(final_vocals_path),
+            target_audio,
             language="ko",
             beam_size=5,
-            vad_filter=False,
-            temperature=0.0,
-            condition_on_previous_text=False,
-            initial_prompt="정확한 한국어 방송 대사 받아쓰기 자막 녹취록.",
+            patience=1.0,                       # 빔 서치 탐색 유지력 강화
+            
+            # 🔑 [핵심 1] Temperature Fallback 활성화 (추론 실패 시 온도를 올려가며 재시도)
+            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            
+            # 🔑 [핵심 2] 스킵 및 거름 현상 완화
+            no_speech_threshold=0.6,             # 무음 판정 임계값 완화
+            log_prob_threshold=-2.0,            # -1.0에서 -2.0으로 낮춰 작은/웅얼거리는 대사 살림
+            compression_ratio_threshold=2.4,
+            condition_on_previous_text=False,   # 앞 문장에 구속되어 통으로 스킵하는 현상 방지
             suppress_blank=False,
-            no_speech_threshold=0.5,
-            log_prob_threshold=-1.0,
-            compression_ratio_threshold=2.4
+            
+            # 🔑 [핵심 3] 프롬프트 튜닝
+            initial_prompt="정확한 한국어 방송 대사, 속삭임, 추임새, 작은 목소리까지 빠짐없이 자막 녹취.",
+            
+            # 🔑 [핵심 4] 소프트 VAD 적용 (무음 점프 현상 방지)
+            vad_filter=True,
+            vad_parameters=dict(
+                threshold=0.2,                  # 기본 0.5 -> 0.2로 낮춰 아주 작은 목소리도 VAD가 살려둠
+                min_speech_duration_ms=100,
+                max_speech_duration_s=30,
+                min_silence_duration_ms=500
+            )
         )
 
         fps = mxf_meta.fps or 25.0
@@ -169,7 +187,6 @@ class AudioSTTAgent(BaseAgent):
             s_tc = self._seconds_to_timecode(seg.start, fps, start_tc)
             e_tc = self._seconds_to_timecode(seg.end, fps, start_tc)
 
-            # 🎯 [수정] 시작 타임코드 ~ 종료 타임코드 표기
             txt_lines.append(f"[{s_tc} ~ {e_tc}] {seg.text.strip()}\n")
 
             transcript_segments.append(
