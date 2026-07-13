@@ -182,7 +182,7 @@ class AudioSTTAgent(BaseAgent):
                 "-ac", "1",
                 "-ar", "16000",
                 "-acodec", "pcm_s16le",
-                "-filter:a", "loudnorm=I=-16:TP=-1.5:LRA=11",
+                #"-filter:a", "loudnorm=I=-16:TP=-1.5:LRA=11",
                 str(final_vocals_path)
             ]
             subprocess.run(cmd_vocal_proc, capture_output=True)
@@ -226,7 +226,8 @@ class AudioSTTAgent(BaseAgent):
         # -------------------------------------------------------------
         # 4. Whisper 노스킵(No-Skip) 고정밀 추론 가동
         # -------------------------------------------------------------
-        target_audio = str(raw_wav_path if self.use_raw_audio_for_stt and raw_wav_path.exists() else final_vocals_path)
+        #target_audio = str(raw_wav_path if self.use_raw_audio_for_stt and raw_wav_path.exists() else final_vocals_path)
+        target_audio = str(raw_wav_path)
 
         model = self._load_model()
         print(f"🎙️ [STT ENGINE] '{Path(target_audio).name}' 정제 소스 기반 음성 인식 진행 중...")
@@ -241,14 +242,14 @@ class AudioSTTAgent(BaseAgent):
             vad_filter=False,
             
             # 🚨 [핵심 2] 무음/확신도 판정 필터 해제 (스킵 현상 방지)
-            no_speech_threshold=None,
-            log_prob_threshold=None,
+            no_speech_threshold=0.6,
+            log_prob_threshold=-1.5,
             compression_ratio_threshold=None,
             
             # 🚨 [핵심 3] 문맥 구속 해제
             condition_on_previous_text=False,
             temperature=0.0,
-            initial_prompt="정확한 한국어 방송 대사, 속삭임, 추임새, 작은 목소리까지 빠짐없이 자막 녹취.",
+            initial_prompt="정확한 한국어 방송 대사 자막 받아쓰기.",
             suppress_blank=False
         )
 
