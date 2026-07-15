@@ -2,7 +2,7 @@
 agents/audio_stt_agent.py
 
 3단계 Agent: 오디오 스트림을 무손실 단일 채널로 추출한 뒤 고정밀 STT를 수행한다.
-(한국어 대사 누락 방지: large-v2 전환 + 프롬프트 지시어 제거 + VAD Off 튜닝)
+(Hugging Face 전용: batiai/batisay-ko-base 호환 및 모델 ID 매핑 적용)
 """
 
 import os
@@ -18,9 +18,20 @@ from schema import AudioSTTResult, TranscriptSegment, MXFBaseMeta
 class AudioSTTAgent(BaseAgent):
     name = "audio_stt_agent"
 
+    # 기존 단축 모델명을 Hugging Face 전체 경로로 매핑하는 사전
+    MODEL_ALIAS_MAP = {
+        "large-v3": "openai/whisper-large-v3",
+        "large-v2": "openai/whisper-large-v2",
+        "large": "openai/whisper-large",
+        "medium": "openai/whisper-medium",
+        "small": "openai/whisper-small",
+        "base": "openai/whisper-base",
+        "tiny": "openai/whisper-tiny",
+    }
+
     def __init__(
         self,
-        model_size: str = "large-v2",  # 💡 [핵심] 한국어 인식률/누락 방지 최강 모델 (large-v3 대신 large-v2)
+        model_size: str = "batiai/batisay-ko-base",  # 💡 기본값 설정
         device: str = "cuda",
         gpu_id: int = 0,
         compute_type: str = "float16",
@@ -28,7 +39,8 @@ class AudioSTTAgent(BaseAgent):
         dialogue_track_index: Optional[int] = None,
         use_raw_audio_for_stt: bool = True
     ):
-        self.model_size = model_size
+        # 단축명(large-v3 등)이 들어오면 Hugging Face 정식 ID로 변환
+        self.model_size = self.MODEL_ALIAS_MAP.get(model_size, model_size)
         self.device = device
         self.gpu_id = gpu_id
         self.device_str = f"{device}:{gpu_id}" if device == "cuda" else device
@@ -40,12 +52,19 @@ class AudioSTTAgent(BaseAgent):
 
     def _load_model(self):
         if self._model is None:
-            from faster_whisper import WhisperModel
-            self._model = WhisperModel(
-                self.model_size,
-                device=self.device,
-                device_index=self.gpu_id,
-                compute_type=self.compute_type
+            import torch
+            from transformers import pipeline
+
+            print(f"📦 [STT 엔진] Hugging Face 파이프라인 로딩 중: {self.model_size}")
+            
+            dtype = torch.float16 if (self.compute_type == "float16" and self.device == "cuda") else torch.float32
+            device_idx = self.gpu_id if self.device == "cuda" else -1
+
+            self._model = pipeline(
+                "automatic-speech-recognition",
+                model=self.model_size,
+                torch_dtype=dtype,
+                device=device_idx,
             )
         return self._model
 
@@ -84,7 +103,7 @@ class AudioSTTAgent(BaseAgent):
         subprocess.run(cmd_extract, capture_output=True)
 
         # -------------------------------------------------------------
-        # 2. Demucs AI 오디오 소스 분리 (화자 분리용 트랙 생성)
+        # 2. Demucs AI 오디오 소스 분리
         # -------------------------------------------------------------
         print("🧠 [STT 엔진] Demucs AI 오디오 소스 분리 가동 중...")
         demucs_model_name = "htdemucs_ft"
@@ -124,7 +143,6 @@ class AudioSTTAgent(BaseAgent):
                 if final_vocals_path.exists(): os.remove(final_vocals_path)
                 if final_bgm_path.exists(): os.remove(final_bgm_path)
 
-                # 16kHz 모노 재인코딩
                 subprocess.run([
                     self.ffmpeg_bin, "-y", "-i", str(d_vocal),
                     "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", str(final_vocals_path)
@@ -140,7 +158,6 @@ class AudioSTTAgent(BaseAgent):
             if not final_vocals_path.exists():
                 os.rename(str(raw_wav_path), str(final_vocals_path))
 
-        # 청소
         try:
             import shutil
             if (base_dir / demucs_model_name).exists():
@@ -149,33 +166,28 @@ class AudioSTTAgent(BaseAgent):
             pass
 
         # -------------------------------------------------------------
-        # 3. Whisper 음성 인식 가동 (무손실 원본 오디오 사용)
+        # 3. Whisper / Batisay 음성 인식 가동
         # -------------------------------------------------------------
         target_audio = str(raw_wav_path if raw_wav_path.exists() else final_vocals_path)
 
-        model = self._load_model()
-        print(f"🎙️ [STT ENGINE] Whisper ({self.model_size}) 무누락 음성 인식 진행 중...")
+        pipe = self._load_model()
+        print(f"🎙️ [STT ENGINE] Hugging Face ({self.model_size}) 음성 인식 진행 중...")
 
-        segments, info = model.transcribe(
+        generate_kwargs = {
+            "language": "korean",
+            "task": "transcribe",
+            "num_beams": 5,
+        }
+
+        result = pipe(
             target_audio,
-            language="ko",
-            beam_size=5,
-            patience=1.0,
-            
-            # 🚨 [핵심 1] VAD 완전 Off (한국어 빠른 대사/속삭임 잘림 완전 차단)
-            vad_filter=False,
-            
-            # 🚨 [핵심 2] 표준 임계값 유지 (가짜 텍스트 루프 및 스킵 방지)
-            no_speech_threshold=0.6,
-            log_prob_threshold=-1.0,
-            compression_ratio_threshold=2.4,
-            condition_on_previous_text=False,  # 앞 문장에 구속되어 통으로 스킵하는 현상 방지
-            temperature=0.0,
-            
-            # 🚨 [핵심 3] 프롬프트를 명령어가 아닌 '자연스러운 한국어 평서문'으로 변경
-            initial_prompt="안녕하세요. 한국어 방송 대사 자막 받아쓰기입니다.",
-            suppress_blank=False
+            return_timestamps=True,
+            chunk_length_s=30,
+            stride_length_s=5,
+            generate_kwargs=generate_kwargs
         )
+
+        chunks = result.get("chunks", [])
 
         fps = mxf_meta.fps or 25.0
         start_tc = mxf_meta.start_timecode or "00:00:00:00"
@@ -183,22 +195,27 @@ class AudioSTTAgent(BaseAgent):
         transcript_segments = []
         txt_lines = []
 
-        for seg in segments:
-            if not seg.text.strip():
+        for chunk in chunks:
+            text = chunk["text"].strip()
+            if not text:
                 continue
 
-            s_tc = self._seconds_to_timecode(seg.start, fps, start_tc)
-            e_tc = self._seconds_to_timecode(seg.end, fps, start_tc)
+            start_sec, end_sec = chunk["timestamp"]
+            start_sec = start_sec if start_sec is not None else 0.0
+            end_sec = end_sec if end_sec is not None else start_sec + 1.0
 
-            txt_lines.append(f"[{s_tc} ~ {e_tc}] {seg.text.strip()}\n")
+            s_tc = self._seconds_to_timecode(start_sec, fps, start_tc)
+            e_tc = self._seconds_to_timecode(end_sec, fps, start_tc)
+
+            txt_lines.append(f"[{s_tc} ~ {e_tc}] {text}\n")
 
             transcript_segments.append(
                 TranscriptSegment(
-                    start_sec=seg.start,
-                    end_sec=seg.end,
-                    text=seg.text,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    text=text,
                     track_index=self.dialogue_track_index if self.dialogue_track_index is not None else 0,
-                    confidence=seg.avg_logprob,
+                    confidence=1.0,
                     start_timecode=s_tc,
                     end_timecode=e_tc,
                     speaker="SPEAKER_00"
@@ -211,7 +228,7 @@ class AudioSTTAgent(BaseAgent):
             print(f"📝 [STT 엔진] 전체 대사 메모장 파일 배출 완료 -> '{final_txt_path.name}'")
 
         print(f"✨ [성공] 총 {len(transcript_segments)}개의 타임라인 문장 인식 완주.\n")
-        return AudioSTTResult(language=info.language, segments=transcript_segments)
+        return AudioSTTResult(language="ko", segments=transcript_segments)
 
     @staticmethod
     def _seconds_to_timecode(seconds: float, fps: float, start_timecode: str) -> str:
