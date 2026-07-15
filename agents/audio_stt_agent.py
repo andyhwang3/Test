@@ -2,7 +2,7 @@
 agents/audio_stt_agent.py
 
 3단계 Agent: 오디오 스트림을 무손실 단일 채널로 추출한 뒤 고정밀 STT를 수행한다.
-(한국어 대사 누락 방지: batiai/batisay-ko-base 사용 + transformers 파이프라인 적용)
+(Hugging Face 전용: batiai/batisay-ko-base 호환 및 모델 ID 매핑 적용)
 """
 
 import os
@@ -18,9 +18,20 @@ from schema import AudioSTTResult, TranscriptSegment, MXFBaseMeta
 class AudioSTTAgent(BaseAgent):
     name = "audio_stt_agent"
 
+    # 기존 단축 모델명을 Hugging Face 전체 경로로 매핑하는 사전
+    MODEL_ALIAS_MAP = {
+        "large-v3": "openai/whisper-large-v3",
+        "large-v2": "openai/whisper-large-v2",
+        "large": "openai/whisper-large",
+        "medium": "openai/whisper-medium",
+        "small": "openai/whisper-small",
+        "base": "openai/whisper-base",
+        "tiny": "openai/whisper-tiny",
+    }
+
     def __init__(
         self,
-        model_size: str = "batiai/batisay-ko-base",  # 💡 batiai/batisay-ko-base 적용
+        model_size: str = "batiai/batisay-ko-base",  # 💡 기본값 설정
         device: str = "cuda",
         gpu_id: int = 0,
         compute_type: str = "float16",
@@ -28,7 +39,8 @@ class AudioSTTAgent(BaseAgent):
         dialogue_track_index: Optional[int] = None,
         use_raw_audio_for_stt: bool = True
     ):
-        self.model_size = model_size
+        # 단축명(large-v3 등)이 들어오면 Hugging Face 정식 ID로 변환
+        self.model_size = self.MODEL_ALIAS_MAP.get(model_size, model_size)
         self.device = device
         self.gpu_id = gpu_id
         self.device_str = f"{device}:{gpu_id}" if device == "cuda" else device
@@ -39,7 +51,6 @@ class AudioSTTAgent(BaseAgent):
         self._model = None
 
     def _load_model(self):
-        """Hugging Face transformers pipeline으로 모델 로드"""
         if self._model is None:
             import torch
             from transformers import pipeline
@@ -92,7 +103,7 @@ class AudioSTTAgent(BaseAgent):
         subprocess.run(cmd_extract, capture_output=True)
 
         # -------------------------------------------------------------
-        # 2. Demucs AI 오디오 소스 분리 (화자 분리용 트랙 생성)
+        # 2. Demucs AI 오디오 소스 분리
         # -------------------------------------------------------------
         print("🧠 [STT 엔진] Demucs AI 오디오 소스 분리 가동 중...")
         demucs_model_name = "htdemucs_ft"
@@ -132,7 +143,6 @@ class AudioSTTAgent(BaseAgent):
                 if final_vocals_path.exists(): os.remove(final_vocals_path)
                 if final_bgm_path.exists(): os.remove(final_bgm_path)
 
-                # 16kHz 모노 재인코딩
                 subprocess.run([
                     self.ffmpeg_bin, "-y", "-i", str(d_vocal),
                     "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", str(final_vocals_path)
@@ -148,7 +158,6 @@ class AudioSTTAgent(BaseAgent):
             if not final_vocals_path.exists():
                 os.rename(str(raw_wav_path), str(final_vocals_path))
 
-        # 청소
         try:
             import shutil
             if (base_dir / demucs_model_name).exists():
@@ -157,21 +166,19 @@ class AudioSTTAgent(BaseAgent):
             pass
 
         # -------------------------------------------------------------
-        # 3. Whisper 음성 인식 가동 (batiai/batisay-ko-base)
+        # 3. Whisper / Batisay 음성 인식 가동
         # -------------------------------------------------------------
         target_audio = str(raw_wav_path if raw_wav_path.exists() else final_vocals_path)
 
         pipe = self._load_model()
         print(f"🎙️ [STT ENGINE] Hugging Face ({self.model_size}) 음성 인식 진행 중...")
 
-        # Hugging Face 파이프라인 호출 파라미터 세팅
         generate_kwargs = {
             "language": "korean",
             "task": "transcribe",
             "num_beams": 5,
         }
 
-        # 음성 데이터 추론 실행 (30초 청크 단위 스트라이딩 적용)
         result = pipe(
             target_audio,
             return_timestamps=True,
@@ -193,7 +200,6 @@ class AudioSTTAgent(BaseAgent):
             if not text:
                 continue
 
-            # 타임스탬프 파싱
             start_sec, end_sec = chunk["timestamp"]
             start_sec = start_sec if start_sec is not None else 0.0
             end_sec = end_sec if end_sec is not None else start_sec + 1.0
